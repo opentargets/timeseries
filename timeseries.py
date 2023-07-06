@@ -1,20 +1,20 @@
 #!/usr/bin/env python
 
 __author__ = "Maria J. Falaguera"
-__date__ = "24 May 2023"
+__date__ = "6 Jul 2023"
 
 """
-timeseries.py: Assess the evolution over time of evidence supporting disease-target associations in the Open Targets Platform. Estimated running time: 2h.
+timeseries.py: Assess the evolution over time of evidence supporting disease-target associations in the Open Targets Platform. Estimated running time: 4h.
 """
 
 # generate gcloud machine
 """
-gcloud dataproc clusters create cf-novelty --region europe-west1 --zone europe-west1-d --single-node --master-machine-type n2-standard-80 --master-boot-disk-size 500 --image-version 2.0-debian10 --project open-targets-eu-devgcloud dataproc clusters create cf-novelty-highmem --region europe-southwest1 --zone europe-southwest1-b --single-node --master-machine-type n2-standard-64 --master-boot-disk-size 2000 --image-version 2.0-debian10 --project open-targets-eu-dev
+gcloud dataproc clusters create cf-timeseries --region europe-west1 --zone europe-west1-d --single-node --master-machine-type n2-highmem-128 --master-boot-disk-size 500 --image-version 2.0-debian10 --project open-targets-eu-dev
 """
 
 # sumbit job to gcloud machine
 """
-gcloud dataproc jobs submit pyspark novelty.py --cluster=cf-novelty --project=open-targets-eu-dev --region="europe-west1"
+gcloud dataproc jobs submit pyspark timeseries.py --cluster=cf-timeseries --project=open-targets-eu-dev --region="europe-west1"
 """
 
 import datetime
@@ -29,17 +29,239 @@ from pyspark.sql import types as T
 
 
 # Required data
-firstYear = 1950
+firstYear = 1970
 lastYear = 2023  # datetime.date.today().year
 noveltyScale = 2  # 2 for long tailed slow decays
 noveltyShift = 2  # 3 for long tailed slow decays
 noveltyWindow = 10
-maxScore = np.sum(1 / np.arange(1, 100000) ** 2)
-noveltyCutoff = 0.1
+maxScore = np.sum(1 / np.arange(1, 100000 + 1) ** 2)
+excludeDatasource = ["europepmc", "chembl"]
+dataSources = [
+    {
+        "id": "ot_genetics_portal",
+        "sectionId": "otGenetics",
+        "label": "OT Genetics",
+        "aggregation": "Genetic association",
+        "aggregationId": "genetic_association",
+        "weight": 1.0,  # needs to be a float
+        "isPrivate": False,
+        "docsLink": "https://platform-docs.opentargets.org/evidence#open-targets-genetics",
+    },
+    {
+        "id": "eva",
+        "sectionId": "eva",
+        "label": "ClinVar",
+        "aggregation": "Genetic association",
+        "aggregationId": "genetic_association",
+        "weight": 1.0,
+        "isPrivate": False,
+        "docsLink": "https://platform-docs.opentargets.org/evidence#clinvar",
+    },
+    {
+        "id": "gene_burden",
+        "sectionId": "geneBurden",
+        "label": "Gene Burden",
+        "aggregation": "Genetic association",
+        "aggregationId": "genetic_association",
+        "weight": 1.0,
+        "isPrivate": False,
+        "docsLink": "https://platform-docs.opentargets.org/evidence#gene-burden",
+    },
+    {
+        "id": "genomics_england",
+        "sectionId": "genomicsEngland",
+        "label": "GEL PanelApp",
+        "aggregation": "Genetic association",
+        "aggregationId": "genetic_association",
+        "weight": 1.0,
+        "isPrivate": False,
+        "docsLink": "https://platform-docs.opentargets.org/evidence#genomics-england-panelapp",
+    },
+    {
+        "id": "gene2phenotype",
+        "sectionId": "gene2Phenotype",
+        "label": "Gene2phenotype",
+        "aggregation": "Genetic association",
+        "aggregationId": "genetic_association",
+        "weight": 1.0,
+        "isPrivate": False,
+        "docsLink": "https://platform-docs.opentargets.org/evidence#gene2phenotype",
+    },
+    {
+        "id": "uniprot_literature",
+        "sectionId": "uniprotLiterature",
+        "label": "UniProt literature",
+        "aggregation": "Genetic association",
+        "aggregationId": "genetic_association",
+        "weight": 1.0,
+        "isPrivate": False,
+        "docsLink": "https://platform-docs.opentargets.org/evidence#uniprot-literature",
+    },
+    {
+        "id": "uniprot_variants",
+        "sectionId": "uniprotVariants",
+        "label": "UniProt curated variants",
+        "aggregation": "Genetic association",
+        "aggregationId": "genetic_association",
+        "weight": 1.0,
+        "isPrivate": False,
+        "docsLink": "https://platform-docs.opentargets.org/evidence#uniprot-variants",
+    },
+    {
+        "id": "orphanet",
+        "sectionId": "orphanet",
+        "label": "Orphanet",
+        "aggregation": "Genetic association",
+        "aggregationId": "genetic_association",
+        "weight": 1.0,
+        "isPrivate": False,
+        "docsLink": "https://platform-docs.opentargets.org/evidence#orphanet",
+    },
+    {
+        "id": "clingen",
+        "sectionId": "clinGen",
+        "label": "Clingen",
+        "aggregation": "Genetic association",
+        "aggregationId": "genetic_association",
+        "weight": 1.0,
+        "isPrivate": False,
+        "docsLink": "https://platform-docs.opentargets.org/evidence#clingen",
+    },
+    {
+        "id": "cancer_gene_census",
+        "sectionId": "cancerGeneCensus",
+        "label": "Cancer Gene Census",
+        "aggregation": "Somatic mutations",
+        "aggregationId": "somatic_mutation",
+        "weight": 1.0,
+        "isPrivate": False,
+        "docsLink": "https://platform-docs.opentargets.org/evidence#cancer-gene-census",
+    },
+    {
+        "id": "intogen",
+        "sectionId": "intOgen",
+        "label": "IntOGen",
+        "aggregation": "Somatic mutations",
+        "aggregationId": "somatic_mutation",
+        "weight": 1.0,
+        "isPrivate": False,
+        "docsLink": "https://platform-docs.opentargets.org/evidence#intogen",
+    },
+    {
+        "id": "eva_somatic",
+        "sectionId": "evaSomatic",
+        "label": "ClinVar (somatic)",
+        "aggregation": "Somatic mutations",
+        "aggregationId": "somatic_mutation",
+        "weight": 1.0,
+        "isPrivate": False,
+        "docsLink": "https://platform-docs.opentargets.org/evidence#clinvar-somatic",
+    },
+    {
+        "id": "cancer_biomarkers",
+        "sectionId": "cancerBiomarkers",
+        "label": "Cancer Biomarkers",
+        "aggregation": "Somatic mutations",
+        "aggregationId": "somatic_mutation",
+        "weight": 1.0,
+        "isPrivate": False,
+        "docsLink": "https://platform-docs.opentargets.org/evidence#cancer-biomarkers",
+    },
+    {
+        "id": "chembl",
+        "sectionId": "chembl",
+        "label": "ChEMBL",
+        "aggregation": "Known drug",
+        "aggregationId": "known_drug",
+        "weight": 1.0,
+        "isPrivate": False,
+        "docsLink": "https://platform-docs.opentargets.org/evidence#chembl",
+    },
+    {
+        "id": "crispr",
+        "sectionId": "crispr",
+        "label": "Project Score",
+        "aggregation": "Affected pathway",
+        "aggregationId": "affected_pathway",
+        "weight": 1.0,
+        "isPrivate": False,
+        "docsLink": "https://platform-docs.opentargets.org/evidence#project-score",
+    },
+    {
+        "id": "slapenrich",
+        "sectionId": "slapEnrich",
+        "label": "SLAPenrich",
+        "aggregation": "Affected pathway",
+        "aggregationId": "affected_pathway",
+        "weight": 0.5,
+        "isPrivate": False,
+        "docsLink": "https://platform-docs.opentargets.org/evidence#slapenrich",
+    },
+    {
+        "id": "progeny",
+        "sectionId": "progeny",
+        "label": "PROGENy",
+        "aggregation": "Affected pathway",
+        "aggregationId": "affected_pathway",
+        "weight": 0.5,
+        "isPrivate": False,
+        "docsLink": "https://platform-docs.opentargets.org/evidence#slapenrich",
+    },
+    {
+        "id": "reactome",
+        "sectionId": "reactome",
+        "label": "Reactome",
+        "aggregation": "Affected pathway",
+        "aggregationId": "affected_pathway",
+        "weight": 1.0,
+        "isPrivate": False,
+        "docsLink": "https://platform-docs.opentargets.org/evidence#reactome",
+    },
+    {
+        "id": "sysbio",
+        "sectionId": "sysBio",
+        "label": "Gene signatures",
+        "aggregation": "Affected pathway",
+        "aggregationId": "affected_pathway",
+        "weight": 0.5,
+        "isPrivate": False,
+        "docsLink": "https://platform-docs.opentargets.org/evidence#gene-signatures",
+    },
+    {
+        "id": "europepmc",
+        "sectionId": "europePmc",
+        "label": "Europe PMC",
+        "aggregation": "Literature",
+        "aggregationId": "literature",
+        "weight": 0.2,
+        "isPrivate": False,
+        "docsLink": "https://platform-docs.opentargets.org/evidence#europe-pmc",
+    },
+    {
+        "id": "expression_atlas",
+        "sectionId": "expression",
+        "label": "Expression Atlas",
+        "aggregation": "RNA expression",
+        "aggregationId": "rna_expression",
+        "weight": 0.2,
+        "isPrivate": False,
+        "docsLink": "https://platform-docs.opentargets.org/evidence#expression-atlas",
+    },
+    {
+        "id": "impc",
+        "sectionId": "impc",
+        "label": "IMPC",
+        "aggregation": "Animal model",
+        "aggregationId": "animal_model",
+        "weight": 0.2,
+        "isPrivate": False,
+        "docsLink": "https://platform-docs.opentargets.org/evidence#impc",
+    },
+]
 
 
 # Paths
-ot_platform_version = "/23.02/"
+ot_platform_version = "23.06"
 
 ## data path
 data_path = "gs://open-targets-data-releases/{}/output/etl/parquet/".format(
@@ -53,6 +275,10 @@ literatureIndex_file = data_path + "literature/literatureIndex"
 results_path = "gs://ot-team/cfalaguera/novelty/{}/".format(ot_platform_version)
 
 evidenceIndirect_file = results_path + "evidenceIndirect"
+
+evidenceIndirectDated_file = results_path + "evidenceIndirectDated"
+
+evidenceDirectDated_file = results_path + "evidenceDirectDated"
 
 associationByDatasourceIndirectOverYears_file = (
     results_path + "associationByDatasourceIndirectOverYears"
@@ -70,9 +296,18 @@ associationByOverallDirectOverYears_file = (
     results_path + "associationByOverallDirectOverYears"
 )
 
-associationByDatasourceIndirectOverYearsSignature_file = (
-    results_path + "associationByDatasourceIndirectOverYearsSignature"
+associationByGeneticIndirectOverYears_file = (
+    results_path + "associationByGeneticIndirectOverYears"
 )
+associationByLiteratureIndirectOverYears_file = (
+    results_path + "associationByLiteratureIndirectOverYears"
+)
+associationByClinicalIndirectOverYears_file = (
+    results_path + "associationByClinicalIndirectOverYears"
+)
+
+reportEvidenceIndirectDated_file = results_path + "reportEvidenceIndirectDated"
+reportEvidenceDirectDated_file = results_path + "reportEvidenceDirectDated"
 
 
 # Establish spark connection
@@ -208,10 +443,10 @@ def getEvidence(
 
 def getEvidenceDated(evidenceLink="indirect"):
     """
-    Map evidence to their publication year (coming from literatureIndex OT file or from evidence studyStartDate field).
+    Map evidence to their publication year (coming from literatureIndex OT file or from evidence studyStartDate field). Estimated running time: 2 mins.
 
     Args:
-        evidenceLink (str): 'direct' or 'indirect'
+        evidenceLink (str):             'direct' or 'indirect'
 
     Returns:
         Dataframe with evidence mapped to their publication year. Columns:
@@ -220,47 +455,66 @@ def getEvidenceDated(evidenceLink="indirect"):
         - score
         - year
         - diseaseId
+        - clinicalPhase
+        - drugId
     """
 
-    # get evidence
-    evidenceDated = getEvidence(evidenceLink=evidenceLink).persist()
+    if evidenceLink == "direct":
+        if os.path.exists(evidenceDirectDated_file):
+            return spark.read.parquet(evidenceDirectDated_file)
 
-    # map evidence coming from literature to their publicaition year
+    elif evidenceLink == "indirect":
+        if os.path.exists(evidenceIndirectDated_file):
+            return spark.read.parquet(evidenceIndirectDated_file)
+
+    # get evidence
+    evidenceDated = getEvidence(
+        evidenceLink=evidenceLink
+    ).persist()  #  persist since we will call this dataframe more than once
+
+    # map evidence coming from literature to their publication year
     publications = (
-        evidenceDated.select(
+        evidenceDated.filter((F.col("datasourceId") != "chembl"))
+        .select(
             "diseaseId",
             "targetId",
             "datasourceId",
             "score",
+            "clinicalPhase",
+            "drugId",
             F.monotonically_increasing_id().alias(
                 "evidenceId"
             ),  # add evidenceId to pin the original evidence for later
-            F.explode("literature").alias("pmid"),
+            F.explode_outer("literature").alias("pmid"),  # keep evidence with no pmid
         )
         # add publication year for pmids
         .join(
-            spark.read.parquet(literatureIndex_file)
-            .select("pmid", "year")
-            .distinct()
-            .filter(F.col("year").isNotNull()),  # filter out evidence without a year
+            spark.read.parquet(literatureIndex_file).select("pmid", "year"),
             "pmid",
-            "inner",
+            "left",  # keep evidence with no year
         )
-        # get earliest year for each evidence (if there's more than one)
-        .groupBy("diseaseId", "targetId", "datasourceId", "score", "evidenceId")
+        # get the earliest year for each evidence if there's more than one; or NULL if there's no year
+        .groupBy(
+            "diseaseId",
+            "targetId",
+            "datasourceId",
+            "score",
+            "clinicalPhase",
+            "drugId",
+            "evidenceId",
+        )
         .agg(F.min("year").alias("year"))
         .drop("evidenceId")
     )
 
     # map evidence coming from studies to their study start year (chembl evidence)
-    studies = evidenceDated.filter(
-        (F.col("datasourceId") == "chembl")
-        & (F.col("studyStartDate").isNotNull())  # filter out evidence without a year
-    ).select(
+    studies = evidenceDated.filter((F.col("datasourceId") == "chembl")).select(
         "diseaseId",
         "targetId",
         "datasourceId",
         "score",
+        "clinicalPhase",
+        "drugId",
         # get year from study start date
         F.split(F.col("studyStartDate"), "-").getItem(0).alias("year"),
     )
@@ -268,10 +522,44 @@ def getEvidenceDated(evidenceLink="indirect"):
     # studies + publications
     evidenceDated = studies.unionByName(publications)
 
+    # unpersist to free up memory
+    evidenceDated.unpersist()
+
     return evidenceDated
 
 
-def getScoreByDatasourceOverYears(evidenceLink="indirect"):
+def reportEvidenceDated(evidenceLink="indirect"):
+    """
+    Report the amount of evidence by source with or without publication date annotated. Estimated running time: 2h.
+
+    Args:
+        evidenceLink (str): 'direct' or 'indirect'
+
+    Returns:
+        Dataframe with evidence mapped to their publication year. Columns:
+        - datasourceId
+        - nAll
+        - nDated
+    """
+
+    evidence = (
+        getEvidenceDated(evidenceLink=evidenceLink)
+        .groupBy("datasourceId")
+        .agg(F.count("*").alias("nAll"))
+        .join(
+            getEvidenceDated(evidenceLink=evidenceLink)
+            .filter(F.col("year").isNotNull())
+            .groupBy("datasourceId")
+            .agg(F.count("*").alias("nDated")),
+            "datasourceId",
+            "left",
+        )
+    )
+
+    return evidence
+
+
+def getScoreByDatasourceOverYears(datasourceId, evidenceLink="indirect"):
     """
     Recalculate association scores by datasource over the years.
 
@@ -287,8 +575,15 @@ def getScoreByDatasourceOverYears(evidenceLink="indirect"):
         - score
     """
 
-    # get evidence with year
-    scoreByDatasourceOverYears = getEvidenceDated(evidenceLink=evidenceLink).persist()
+    # get dated evidence
+    scoreByDatasourceOverYears = getEvidenceDated(evidenceLink=evidenceLink).filter(
+        F.col("datasourceId") == datasourceId
+    )
+
+    # fill non-dated evidence with lastYear + 1 to avoid loosing them (we'll reset them later)
+    scoreByDatasourceOverYears = scoreByDatasourceOverYears.fillna(
+        str(lastYear + 1), subset=["year"]
+    )
 
     # get all the combinations of datasourceId vs years in the range between the firstYear and the lastYear set
     sourceVSyear = (
@@ -298,11 +593,13 @@ def getScoreByDatasourceOverYears(evidenceLink="indirect"):
         .crossJoin(
             # unique years in range
             spark.createDataFrame(
-                data=[[r] for r in range(firstYear, lastYear + 1, 1)],
+                data=[
+                    [r] for r in range(firstYear, lastYear + 1 + 1, 1)
+                ],  # lastYear + 1 as a surrogate for non-dated evidence
                 schema=["year"],
             )
         )
-        .repartition(400, "datasourceId")  # repartition required after crossJoin
+        .repartition(400, "year")  # repartition required after crossJoin
     )
 
     # get all the combinations of datasourceId vs years vs disease-target score
@@ -350,7 +647,7 @@ def getScoreByDatasourceOverYears(evidenceLink="indirect"):
         )
         .distinct()  # get rid of rows multiplicity coming from different original scores
         .replace(
-            float("nan"), None
+            float("nan"), None, subset=["score"]
         )  # convert score = nan values into null values for later (pyspark filter function misshandles nan values)
     )
 
@@ -358,6 +655,7 @@ def getScoreByDatasourceOverYears(evidenceLink="indirect"):
 
 
 def getNoveltyByDatasourceOverYears(
+    datasourceId,
     evidenceLink="indirect",
     scale=noveltyScale,
     shift=noveltyShift,
@@ -384,19 +682,27 @@ def getNoveltyByDatasourceOverYears(
 
     # get association score by datasource over the years
     if evidenceLink == "direct":
-        if os.path.exists(associationByDatasourceDirectOverYears_file):
-            return spark.read.parquet(associationByDatasourceDirectOverYears_file)
-        else:
-            noveltyByDatasourceOverYears = getScoreByDatasourceOverYears(
-                evidenceLink=evidenceLink
-            ).persist()
+        if os.path.exists(
+            associationByDatasourceDirectOverYears_file + "/sourceId=" + datasourceId
+        ):
+            return spark.read.parquet(
+                associationByDatasourceDirectOverYears_file
+                + "/sourceId="
+                + datasourceId
+            )
     elif evidenceLink == "indirect":
-        if os.path.exists(associationByDatasourceIndirectOverYears_file):
-            return spark.read.parquet(associationByDatasourceIndirectOverYears_file)
-        else:
-            noveltyByDatasourceOverYears = getScoreByDatasourceOverYears(
-                evidenceLink=evidenceLink
-            ).persist()
+        if os.path.exists(
+            associationByDatasourceIndirectOverYears_file + "/sourceId=" + datasourceId
+        ):
+            return spark.read.parquet(
+                associationByDatasourceIndirectOverYears_file
+                + "/sourceId="
+                + datasourceId
+            )
+
+    scoreByDatasourceOverYears = getScoreByDatasourceOverYears(
+        evidenceLink=evidenceLink, datasourceId=datasourceId
+    ).persist()  #  persist since we will call this dataframe more than once
 
     # prepare partition: disease-target-datasource triplet ordered by increasing year
     partition1 = Window.partitionBy("diseaseId", "targetId", "datasourceId").orderBy(
@@ -405,7 +711,7 @@ def getNoveltyByDatasourceOverYears(
 
     # calculate novelty for disease-target-datasource over the years
     noveltyByDatasourceOverYears = (
-        noveltyByDatasourceOverYears.fillna(
+        scoreByDatasourceOverYears.fillna(
             0, subset=["score"]
         )  # fill NaN score with 0 for later novelty calculation
         # for each target-disease-datasource get peaks of score shift (when current year score minus previous year score > 0)
@@ -441,11 +747,17 @@ def getNoveltyByDatasourceOverYears(
         )
         # add max. novelty values to original disease-target-datasource-year dataframe
         .join(
-            noveltyByDatasourceOverYears,
+            scoreByDatasourceOverYears,
             ["diseaseId", "targetId", "datasourceId", "year"],
             "right",
         )
+        # reset non-dated evidence to null year
+        .replace(lastYear + 1, None, subset=["year"])
+        # set novelty=0 when novelty=null
+        .fillna(0, subset=["novelty"])
     )
+
+    # scoreByDatasourceOverYears.unpersist()
 
     return noveltyByDatasourceOverYears
 
@@ -471,24 +783,18 @@ def getScoreByOverallOverYears(
 
     # get association score by datasource over the years
     if evidenceLink == "direct":
-        if os.path.exists(associationByDatasourceDirectOverYears_file):
-            scoreByOverallOverYears = spark.read.parquet(
-                associationByDatasourceDirectOverYears_file
-            ).persist()  #  persist since we will call this dataframe more than once
-        else:
-            scoreByOverallOverYears = getScoreByDatasourceOverYears(
-                evidenceLink=evidenceLink
-            ).persist()
-
+        scoreByDatasourceOverYears = spark.read.parquet(
+            associationByDatasourceDirectOverYears_file
+        ).persist()  #  persist since we will call this dataframe more than once
     elif evidenceLink == "indirect":
-        if os.path.exists(associationByDatasourceIndirectOverYears_file):
-            scoreByOverallOverYears = spark.read.parquet(
-                associationByDatasourceIndirectOverYears_file
-            ).persist()  #  persist since we will call this dataframe more than once
-        else:
-            scoreByOverallOverYears = getScoreByDatasourceOverYears(
-                evidenceLink=evidenceLink
-            ).persist()
+        scoreByDatasourceOverYears = spark.read.parquet(
+            associationByDatasourceIndirectOverYears_file
+        ).persist()  #  persist since we will call this dataframe more than once
+
+    # fill non-dated evidence with lastYear + 1 to avoid loosing them (we'll reset them later)
+    scoreByDatasourceOverYears = scoreByDatasourceOverYears.fillna(
+        str(lastYear + 1), ["year"]
+    )
 
     # get datasources' weights in overall score formula
     weights = spark.createDataFrame(
@@ -501,7 +807,7 @@ def getScoreByOverallOverYears(
 
     # exclude datasources
     if len(excludeDatasource):
-        scoreByOverallOverYears = scoreByOverallOverYears.filter(
+        scoreByDatasourceOverYears = scoreByDatasourceOverYears.filter(
             ~F.col("datasourceId").isin(excludeDatasource)
         )
 
@@ -515,7 +821,7 @@ def getScoreByOverallOverYears(
 
     # apply functions to partitions: for each target-disease-year calculate overall harmonic sum score
     scoreByOverallOverYears = (
-        scoreByOverallOverYears.join(
+        scoreByDatasourceOverYears.join(
             weights, "datasourceId", "left"
         )  # add datasources' weights
         # calculate overall harmonic score
@@ -531,9 +837,11 @@ def getScoreByOverallOverYears(
         )
         .distinct()  # get rid of "score" and "weight" multiplicity
         .replace(
-            float("nan"), None
+            float("nan"), None, subset=["score"]
         )  # convert score = nan values into null values (pyspark filter function misshandles nan values)
     )
+
+    scoreByDatasourceOverYears.unpersist()
 
     return scoreByOverallOverYears
 
@@ -568,25 +876,20 @@ def getNoveltyByOverallOverYears(
     if evidenceLink == "direct":
         if os.path.exists(associationByOverallDirectOverYears_file):
             return spark.read.parquet(associationByOverallDirectOverYears_file)
-        else:
-            noveltyByOverallOverYears = getScoreByOverallOverYears(
-                evidenceLink=evidenceLink, excludeDatasource=excludeDatasource
-            ).persist()
-
     elif evidenceLink == "indirect":
         if os.path.exists(associationByOverallIndirectOverYears_file):
             return spark.read.parquet(associationByOverallIndirectOverYears_file)
-        else:
-            noveltyByOverallOverYears = getScoreByOverallOverYears(
-                evidenceLink=evidenceLink, excludeDatasource=excludeDatasource
-            ).persist()
+
+    scoreByOverallOverYears = getScoreByOverallOverYears(
+        evidenceLink=evidenceLink, excludeDatasource=excludeDatasource
+    ).persist()  #  persist since we will call this dataframe more than once
 
     # prepare partition: disease-target pair ordered by increasing year
     partition1 = Window.partitionBy("diseaseId", "targetId").orderBy("year")
 
     # calculate novelty for disease-target over the years
     noveltyByOverallOverYears = (
-        noveltyByOverallOverYears.fillna(
+        scoreByOverallOverYears.fillna(
             0, subset=["score"]
         )  # fill NaN score with 0 for later novelty calculation
         # for each target-disease get peaks of score shift (when current year score minus previous year score > 0)
@@ -621,68 +924,19 @@ def getNoveltyByOverallOverYears(
         )
         # add max. novelty values to original dataframe disease-target-year
         .join(
-            noveltyByOverallOverYears,
+            scoreByOverallOverYears,
             ["diseaseId", "targetId", "year"],
             "right",
         )
+        # reset non-dated evidence to null year
+        .replace(lastYear + 1, None, subset=["year"])
+        # set novelty=0 when novelty=null
+        .fillna(0, subset=["novelty"])
     )
+
+    scoreByOverallOverYears.unpersist()
 
     return noveltyByOverallOverYears
-
-
-def getNoveltySignatureByDatasource(
-    evidenceLink="indirect", noveltyCutoff=noveltyCutoff
-):
-    """
-    Generate novelty signatures representing associations' novelty evolution.
-    Novelty signatures consist of a binary vector with values equal 1 for those years when the novelty surpasess the novelty cutoff.
-
-    Args:
-        evidenceLink (str):         'direct'/'indirect'
-        noveltyCutoff (float):      novelty value cutoff required to set a 1 in the binary vector.
-
-    Returns:
-        Dataframe with by-datasource novelty signatures of associations. Columns:
-        - diseaseId
-        - targetId
-        - datasourceId
-        - signature
-    """
-
-    # get novelty by datasource over the years
-    if evidenceLink == "direct":
-        signature = spark.read.parquet(associationByDatasourceDirectOverYears_file)
-    elif evidenceLink == "indirect":
-        signature = spark.read.parquet(associationByDatasourceIndirectOverYears_file)
-
-    # prepare partition: disease-target-datasourc triplet ordered by increasing year
-    partition1 = Window.partitionBy("diseaseId", "targetId", "datasourceId").orderBy(
-        "year"
-    )
-
-    # get novelty by datasource over the years
-    signature = (
-        signature
-        # convert novelty values into 1/0
-        .withColumn(
-            "binNovelty", F.when(F.col("novelty") >= noveltyCutoff, 1).otherwise(0)
-        )
-        # get novelty signature
-        .select(
-            "diseaseId",
-            "targetId",
-            "datasourceId",
-            "year",
-            F.collect_list("binNovelty").over(partition1).alias("noveltySignature"),
-        )
-        .filter(F.col("year") == 2023)  # remove multiplicity
-        .drop("year")
-        .filter(
-            F.array_contains("noveltySignature", 1)
-        )  # consider only those datasources with non-only-zeros signatures (novelty values above the cutoff)
-    )
-
-    return signature
 
 
 def writeParquet(dataframe, filename):
@@ -702,25 +956,66 @@ def writeParquet(dataframe, filename):
         print("writting {}...".format(filename))
         dataframe.write.parquet(filename)
         print("{} succesfully generated! :)".format(filename))
+        spark.catalog.clearCache()  # remove all tables to free up space
 
 
 if 0:
     writeParquet(
-        dataframe=getEvidence("indirect"),
-        filename=evidenceIndirect_file,
+        dataframe=getEvidenceDated(evidenceLink="indirect"),
+        filename=evidenceIndirectDated_file,
     )
 
     writeParquet(
-        dataframe=getNoveltyByDatasourceOverYears(evidenceLink="indirect"),
-        filename=associationByDatasourceIndirectOverYears_file,
+        dataframe=reportEvidenceDated(evidenceLink="indirect"),
+        filename=reportEvidenceIndirectDated_file,
     )
 
+    for datasourceId in [i["id"] for i in dataSources]:
+        writeParquet(
+            dataframe=getNoveltyByDatasourceOverYears(
+                evidenceLink="indirect", datasourceId=datasourceId
+            ),
+            filename=associationByDatasourceIndirectOverYears_file
+            + "/sourceId="
+            + datasourceId,
+        )
+
+    # overall novelty
     writeParquet(
         dataframe=getNoveltyByOverallOverYears(evidenceLink="indirect"),
         filename=associationByOverallIndirectOverYears_file,
     )
 
+    # genetic novelty
     writeParquet(
-        dataframe=getNoveltySignatureByDatasource(evidenceLink="indirect"),
-        filename=associationByDatasourceIndirectOverYearsSignature_file,
+        dataframe=getNoveltyByOverallOverYears(
+            evidenceLink="indirect", excludeDatasource=["chembl", "europepmc"]
+        ),
+        filename=associationByGeneticIndirectOverYears_file,
+    )
+
+    # literature novelty
+    writeParquet(
+        dataframe=getNoveltyByOverallOverYears(
+            evidenceLink="indirect",
+            excludeDatasource=[
+                datasource["id"]
+                for datasource in dataSources
+                if datasource["id"] != "europepmc"
+            ],
+        ),
+        filename=associationByLiteratureIndirectOverYears_file,
+    )
+
+    # clinical novelty
+    writeParquet(
+        dataframe=getNoveltyByOverallOverYears(
+            evidenceLink="indirect",
+            excludeDatasource=[
+                datasource["id"]
+                for datasource in dataSources
+                if datasource["id"] != "chembl"
+            ],
+        ),
+        filename=associationByClinicalIndirectOverYears_file,
     )
