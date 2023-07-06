@@ -6,3 +6,6 @@ Generate timeseries data.
 
 ### plotTimeseries.py
 Plot timeseries.
+
+### novels.py
+List novel associations.
