@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 __author__ = "Maria J. Falaguera"
-__date__ = "6 Jul 2023"
+__date__ = "10 Jul 2023"
 
 """
 timeseries.py: Assess the evolution over time of evidence supporting disease-target associations in the Open Targets Platform. Estimated running time: 4h.
@@ -35,7 +35,8 @@ noveltyScale = 2  # 2 for long tailed slow decays
 noveltyShift = 2  # 3 for long tailed slow decays
 noveltyWindow = 10
 maxScore = np.sum(1 / np.arange(1, 100000 + 1) ** 2)
-excludeDatasource = ["europepmc", "chembl"]
+
+
 dataSources = [
     {
         "id": "ot_genetics_portal",
@@ -178,6 +179,16 @@ dataSources = [
         "docsLink": "https://platform-docs.opentargets.org/evidence#chembl",
     },
     {
+        "id": "crispr_screen",
+        "sectionId": "crispr_screen",
+        "label": "CRISPR Screens",
+        "aggregation": "Affected pathway",
+        "aggregationId": "affected_pathway",
+        "weight": 1.0,
+        "isPrivate": False,
+        "docsLink": "https://platform-docs.opentargets.org/evidence#project-score",
+    },
+    {
         "id": "crispr",
         "sectionId": "crispr",
         "label": "Project Score",
@@ -257,6 +268,36 @@ dataSources = [
         "isPrivate": False,
         "docsLink": "https://platform-docs.opentargets.org/evidence#impc",
     },
+    # {
+    #     "id": "ot_crispr",
+    #     "sectionId": "otCrispr",
+    #     "label": "OT CRISPR",
+    #     "aggregation": "Partner-only",
+    #     "aggregationId": "partner_only",
+    #     "weight": 0.5,
+    #     "isPrivate": True,
+    #     "docsLink": "https://partner-platform.opentargets.org/projects",
+    # },
+    # {
+    #     "id": "encore",
+    #     "sectionId": "encore",
+    #     "label": "ENCORE",
+    #     "aggregation": "Partner-only",
+    #     "aggregationId": "partner_only",
+    #     "weight": 0.5,
+    #     "isPrivate": True,
+    #     "docsLink": "https://partner-platform.opentargets.org/projects",
+    # },
+    # {
+    #     "id": "ot_crispr_validation",
+    #     "sectionId": "validationlab",
+    #     "label": "OT Validation",
+    #     "aggregation": "Partner-only",
+    #     "aggregationId": "partner_only",
+    #     "weight": 0.5,
+    #     "isPrivate": True,
+    #     "docsLink": "https://partner-platform.opentargets.org/projects",
+    # },
 ]
 
 
@@ -349,33 +390,7 @@ def getDatasourceToWeight():
     Returns list of data sources' weights for overall score.
     """
 
-    weights = [
-        ["cancer_biomarkers", 0.5],
-        ["cancer_gene_census", 1],
-        ["chembl", 1],
-        ["clingen", 1],
-        ["crispr", 1],
-        ["encore", 0.5],
-        ["europepmc", 0.2],
-        ["eva", 1],  # clinvar
-        ["eva_somatic", 1],  # clinvar (somatic)
-        ["expression_atlas", 0.2],
-        ["gene2phenotype", 1],
-        ["gene_burden", 1],
-        ["genomics_england", 1],
-        ["impc", 0.2],
-        ["intogen", 1],
-        ["orphanet", 1],
-        ["ot_crispr", 0.5],
-        ["ot_crispr_validation", 0.5],
-        ["ot_genetics_portal", 1],
-        ["progeny", 0.5],
-        ["reactome", 1],
-        ["slapenrich", 0.5],
-        ["sysbio", 0.5],
-        ["uniprot_literature", 1],
-        ["uniprot_variants", 1],
-    ]
+    weights = [[datasource["id"], datasource["weight"]] for datasource in dataSources]
 
     return weights
 
@@ -582,7 +597,7 @@ def getScoreByDatasourceOverYears(datasourceId, evidenceLink="indirect"):
 
     # fill non-dated evidence with lastYear + 1 to avoid loosing them (we'll reset them later)
     scoreByDatasourceOverYears = scoreByDatasourceOverYears.fillna(
-        str(lastYear + 1), subset=["year"]
+        str(lastYear + 1), subset=["year"]  # it needs to be a str to avoid errors
     )
 
     # get all the combinations of datasourceId vs years in the range between the firstYear and the lastYear set
@@ -649,6 +664,10 @@ def getScoreByDatasourceOverYears(datasourceId, evidenceLink="indirect"):
         .replace(
             float("nan"), None, subset=["score"]
         )  # convert score = nan values into null values for later (pyspark filter function misshandles nan values)
+        # reset non-dated evidence to null year
+        .replace(
+            str(lastYear + 1), None, subset=["year"]
+        )  # it needs to be a string to avoid errors
     )
 
     return scoreByDatasourceOverYears
@@ -680,26 +699,6 @@ def getNoveltyByDatasourceOverYears(
         - novelty
     """
 
-    # get association score by datasource over the years
-    if evidenceLink == "direct":
-        if os.path.exists(
-            associationByDatasourceDirectOverYears_file + "/sourceId=" + datasourceId
-        ):
-            return spark.read.parquet(
-                associationByDatasourceDirectOverYears_file
-                + "/sourceId="
-                + datasourceId
-            )
-    elif evidenceLink == "indirect":
-        if os.path.exists(
-            associationByDatasourceIndirectOverYears_file + "/sourceId=" + datasourceId
-        ):
-            return spark.read.parquet(
-                associationByDatasourceIndirectOverYears_file
-                + "/sourceId="
-                + datasourceId
-            )
-
     scoreByDatasourceOverYears = getScoreByDatasourceOverYears(
         evidenceLink=evidenceLink, datasourceId=datasourceId
     ).persist()  #  persist since we will call this dataframe more than once
@@ -711,9 +710,11 @@ def getNoveltyByDatasourceOverYears(
 
     # calculate novelty for disease-target-datasource over the years
     noveltyByDatasourceOverYears = (
-        scoreByDatasourceOverYears.fillna(
-            0, subset=["score"]
-        )  # fill NaN score with 0 for later novelty calculation
+        scoreByDatasourceOverYears
+        # fill non-dated evidence with lastYear + 1 to avoid loosing them (we'll reset them later)
+        .fillna(lastYear + 1, subset=["year"])
+        # fill NaN score with 0 for later novelty calculation
+        .fillna(0, subset=["score"])
         # for each target-disease-datasource get peaks of score shift (when current year score minus previous year score > 0)
         .select(
             "diseaseId",
@@ -793,7 +794,7 @@ def getScoreByOverallOverYears(
 
     # fill non-dated evidence with lastYear + 1 to avoid loosing them (we'll reset them later)
     scoreByDatasourceOverYears = scoreByDatasourceOverYears.fillna(
-        str(lastYear + 1), ["year"]
+        lastYear + 1, ["year"]
     )
 
     # get datasources' weights in overall score formula
@@ -821,9 +822,8 @@ def getScoreByOverallOverYears(
 
     # apply functions to partitions: for each target-disease-year calculate overall harmonic sum score
     scoreByOverallOverYears = (
-        scoreByDatasourceOverYears.join(
-            weights, "datasourceId", "left"
-        )  # add datasources' weights
+        # add datasources' weights
+        scoreByDatasourceOverYears.join(weights, "datasourceId", "left")
         # calculate overall harmonic score
         .select(
             "diseaseId",
@@ -834,11 +834,12 @@ def getScoreByOverallOverYears(
                     F.collect_list(F.col("score") * F.col("weight")).over(partition1)
                 )
             ).alias("score"),
-        )
-        .distinct()  # get rid of "score" and "weight" multiplicity
-        .replace(
-            float("nan"), None, subset=["score"]
-        )  # convert score = nan values into null values (pyspark filter function misshandles nan values)
+            # get rid of "score" and "weight" multiplicity
+        ).distinct()
+        # convert score = nan values into null values (pyspark filter function misshandles nan values)
+        .replace(float("nan"), None, subset=["score"])
+        # reset non-dated evidence to null year
+        .replace(lastYear + 1, None, subset=["year"])
     )
 
     scoreByDatasourceOverYears.unpersist()
@@ -872,26 +873,24 @@ def getNoveltyByOverallOverYears(
         - novelty
     """
 
-    # get association score by datasource over the years
-    if evidenceLink == "direct":
-        if os.path.exists(associationByOverallDirectOverYears_file):
-            return spark.read.parquet(associationByOverallDirectOverYears_file)
-    elif evidenceLink == "indirect":
-        if os.path.exists(associationByOverallIndirectOverYears_file):
-            return spark.read.parquet(associationByOverallIndirectOverYears_file)
-
-    scoreByOverallOverYears = getScoreByOverallOverYears(
-        evidenceLink=evidenceLink, excludeDatasource=excludeDatasource
-    ).persist()  #  persist since we will call this dataframe more than once
+    scoreByOverallOverYears = (
+        getScoreByOverallOverYears(
+            evidenceLink=evidenceLink, excludeDatasource=excludeDatasource
+        )
+        # fill non-dated evidence with lastYear + 1 to avoid loosing them (we'll reset them later)
+        .fillna(lastYear + 1, ["year"])
+        # persist since we will call this dataframe more than once
+        .persist()
+    )
 
     # prepare partition: disease-target pair ordered by increasing year
     partition1 = Window.partitionBy("diseaseId", "targetId").orderBy("year")
 
     # calculate novelty for disease-target over the years
     noveltyByOverallOverYears = (
-        scoreByOverallOverYears.fillna(
-            0, subset=["score"]
-        )  # fill NaN score with 0 for later novelty calculation
+        scoreByOverallOverYears
+        # fill NaN score with 0 for later novelty calculation
+        .fillna(0, subset=["score"])
         # for each target-disease get peaks of score shift (when current year score minus previous year score > 0)
         .select(
             "diseaseId",
@@ -960,6 +959,7 @@ def writeParquet(dataframe, filename):
 
 
 if 0:
+    # dating evidence
     writeParquet(
         dataframe=getEvidenceDated(evidenceLink="indirect"),
         filename=evidenceIndirectDated_file,
@@ -970,7 +970,8 @@ if 0:
         filename=reportEvidenceIndirectDated_file,
     )
 
-    for datasourceId in [i["id"] for i in dataSources]:
+    # datasource novelty
+    for datasourceId in [datasource["id"] for datasource in dataSources]:
         writeParquet(
             dataframe=getNoveltyByDatasourceOverYears(
                 evidenceLink="indirect", datasourceId=datasourceId
