@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 __author__ = "Maria J. Falaguera"
-__date__ = "15 Oct 2024"
+__date__ = "08 Nov 2024"
 
 """
 novels.py: List novel target-disease associations in the Open Targets Platform.
@@ -9,7 +9,7 @@ novels.py: List novel target-disease associations in the Open Targets Platform.
 
 # sumbit job to gcloud machine
 """
-gcloud dataproc jobs submit pyspark novels.py --cluster=cf-novelty --project=open-targets-eu-dev --region="europe-west1"
+gcloud dataproc jobs submit pyspark novels.py --cluster=cf-novels --project=open-targets-eu-dev --region="europe-west1"
 """
 from pyspark.sql import functions as F
 from pyspark.sql import SparkSession, Window, DataFrame
@@ -655,129 +655,183 @@ def getTherapeuticAreaForDisease():
     return diseases
 
 
-# try different novelty cutoffs to find novel target-disease associations in 2023
 for cutoff in range(1, 10):
     cutoff = cutoff / 10
-    pairs = (
-        spark.read.parquet(associationByDatasourceDirectOverYears_file)
-        .filter(
-            (F.col("novelty") > 0)
-            & (F.col("novelty") >= cutoff)
-            & (F.col("year") == 2023)
+    for year in range(2000, 2023 + 1):
+        pairs = (
+            spark.read.parquet(associationByDatasourceDirectOverYears_file)
+            .withColumn(
+                "lastNovelty",
+                F.lag("novelty").over(
+                    Window.partitionBy("targetId", "diseaseId", "datasourceId").orderBy(
+                        "year"
+                    )
+                ),
+            )
+            .filter(
+                (F.col("novelty") > 0)
+                & (F.col("novelty") >= cutoff)
+                & (F.col("year") == year)
+                & (F.col("novelty") > F.col("lastNovelty"))
+            )
+            .join(
+                getTherapeuticAreaForDisease().select(
+                    "diseaseId", "therapeuticAreaName", "therapeuticArea"
+                ),
+                "diseaseId",
+                "left",
+            )
+            # filter only indications
+            .filter(
+                ~F.col("therapeuticAreaName").isin(
+                    [
+                        "measurement",
+                        "biological process",
+                        "medical procedure",
+                        "phenotype",
+                        "injury, poisoning or other complication",
+                        "animal disease",
+                    ]
+                )
+            )
+            # filter very generic indications
+            .filter(F.col("therapeuticArea") != F.col("diseaseId"))
+            .filter(
+                ~F.col("diseaseId").isin(
+                    ["EFO_0000508", "EFO_0010642", "MONDO_0004992"]
+                )
+            )
+            # filter noisy areas
+            .filter(
+                F.col("therapeuticArea") != "OTAR_0000017"
+            )  # has many spermatic dysfunction related targets coming from IMPC
+            # add novelty data type
+            .join(
+                spark.createDataFrame(
+                    getDatatypeForDatasource(),
+                    schema=["datasourceId", "datatypeId"],
+                ),
+                "datasourceId",
+                "left",
+            )
+            .select(
+                "targetId",
+                "diseaseId",
+                "novelty",
+                "datatypeId",
+                "datasourceId",
+                "therapeuticAreaName",
+            )
+            # add disease info
+            .join(
+                spark.read.parquet(diseases_file).select(
+                    F.col("id").alias("diseaseId"), F.col("name").alias("diseaseName")
+                ),
+                "diseaseId",
+                "left",
+            )
+            # add target info
+            .join(
+                spark.read.parquet(targets_file).select(
+                    F.col("id").alias("targetId"),
+                    F.col("biotype").alias("targetBiotype"),
+                    F.col("approvedSymbol").alias("targetSymbol"),
+                ),
+                "targetId",
+                "left",
+            )
+            .distinct()
         )
-        .join(
-            getTherapeuticAreaForDisease().select(
-                "diseaseId", "therapeuticAreaName", "therapeuticArea"
-            ),
-            "diseaseId",
-            "left",
-        )
-        # filter only indications
-        .filter(
-            ~F.col("therapeuticAreaName").isin(
-                [
-                    "measurement",
-                    "biological process",
-                    "medical procedure",
-                    "phenotype",
-                    "injury, poisoning or other complication",
-                    "animal disease",
-                ]
+
+        (
+            pairs.groupby("therapeuticAreaName")
+            .agg(
+                F.size(F.collect_set(F.concat_ws("-", "diseaseId", "targetId"))).alias(
+                    "associations"
+                ),
+            )
+            .withColumn("year", F.lit(year))
+            .write.parquet(
+                "gs://ot-team/cfalaguera/novels/associations/novelty={}/year={}".format(
+                    cutoff, year
+                )
             )
         )
-        # filter very generic indications
-        .filter(F.col("therapeuticArea") != F.col("diseaseId"))
-        .filter(
-            ~F.col("diseaseId").isin(["EFO_0000508", "EFO_0010642", "MONDO_0004992"])
-        )
-        # add novelty data type
-        .join(
-            spark.createDataFrame(
-                getDatatypeForDatasource(),
-                schema=["datasourceId", "datatypeId"],
-            ),
-            "datasourceId",
-            "left",
-        )
-        .select(
-            "targetId",
-            "diseaseId",
-            "novelty",
-            "datatypeId",
-            "datasourceId",
-            "therapeuticAreaName",
-        )
-        # add disease info
-        .join(
-            spark.read.parquet(diseases_file).select(
-                F.col("id").alias("diseaseId"), F.col("name").alias("diseaseName")
-            ),
-            "diseaseId",
-            "left",
-        )
-        # add target info
-        .join(
-            spark.read.parquet(targets_file).select(
-                F.col("id").alias("targetId"),
-                F.col("biotype").alias("targetBiotype"),
-                F.col("approvedSymbol").alias("targetSymbol"),
-            ),
-            "targetId",
-            "left",
-        )
-        .distinct()
-    )
 
-    # counts
-    print(cutoff)
-    print("novel targets: {:,d}".format(pairs.select("targetId").distinct().count()))
-    print(
-        "novel target-disease: {:,d}".format(
-            pairs.select("targetId", "diseaseId").distinct().count()
-        )
-    )
-
-    (
-        pairs.groupby("datasourceId")
-        .agg(F.size(F.collect_set("targetId")).alias("targets"))
-        .write.parquet(
-            "gs://ot-team/cfalaguera/novels/targetsByDatasource{}".format(cutoff)
-        )
-    )
-
-    (
-        pairs.groupby("datatypeId")
-        .agg(F.size(F.collect_set("targetId")).alias("targets"))
-        .write.parquet(
-            "gs://ot-team/cfalaguera/novels/targetsByDatatype{}".format(cutoff)
-        )
-    )
-
-    (
-        pairs.groupby("targetBiotype")
-        .agg(F.size(F.collect_set("targetId")).alias("targets"))
-        .write.parquet(
-            "gs://ot-team/cfalaguera/novels/targetsByBiotype{}".format(cutoff)
-        )
-    )
-
-    (
-        pairs.groupby("therapeuticAreaName")
-        .agg(F.size(F.collect_set("targetId")).alias("targets"))
-        .write.parquet(
-            "gs://ot-team/cfalaguera/novels/targetsByTherapeuticAreaName{}".format(
-                cutoff
+        pairs.groupby("therapeuticAreaName", "targetSymbol").agg(
+            F.size(F.collect_set("diseaseId")).alias("nDisease"),
+            F.mean("novelty").alias("meanNovelty"),
+            F.max("novelty").alias("maxNovelty"),
+            F.concat_ws(",", F.collect_set("targetId")).alias("targetIds"),
+            F.concat_ws(",", F.collect_set("datasourceId")).alias("datasources"),
+            F.concat_ws(";", F.collect_set("diseaseName")).alias("diseaseNames"),
+            F.concat_ws(";", F.collect_set("diseaseId")).alias("diseaseIds"),
+        ).write.parquet(
+            "gs://ot-team/cfalaguera/novels/novels/novelty={}/year={}".format(
+                cutoff, year
             )
         )
-    )
 
-    # list of novel targets in the context of diseases
-    pairs.groupby("therapeuticAreaName", "targetSymbol").agg(
-        F.size(F.collect_set("diseaseId")).alias("nDisease"),
-        F.mean("novelty").alias("meanNovelty"),
-        F.max("novelty").alias("maxNovelty"),
-        F.concat_ws(",", F.collect_set("targetId")).alias("targetIds"),
-        F.concat_ws(",", F.collect_set("datasourceId")).alias("datasources"),
-        F.concat_ws(";", F.collect_set("diseaseName")).alias("diseaseNames"),
-        F.concat_ws(";", F.collect_set("diseaseId")).alias("diseaseIds"),
-    ).write.parquet("gs://ot-team/cfalaguera/novels/novels{}".format(cutoff))
+        (
+            pairs.groupby("targetBiotype")
+            .agg(F.size(F.collect_set("targetId")).alias("targets"))
+            .write.parquet(
+                "gs://ot-team/cfalaguera/novels/targetsByBiotype/novelty={}/year={}".format(
+                    cutoff, year
+                )
+            )
+        )
+
+        (
+            pairs.groupby("therapeuticAreaName", "datasourceId")
+            .agg(
+                F.size(F.collect_set("targetId")).alias("targets"),
+                F.size(F.collect_set(F.concat_ws("-", "diseaseId", "targetId"))).alias(
+                    "associations"
+                ),
+            )
+            .write.parquet(
+                "gs://ot-team/cfalaguera/novels/counts/novelty={}/year={}".format(
+                    cutoff, year
+                )
+            )
+        )
+
+        (
+            pairs.withColumn(
+                "therapeuticAreaName",
+                F.when(
+                    F.col("therapeuticAreaName").isin(
+                        [
+                            "cancer or benign tumor",
+                        ]
+                    ),
+                    F.col("therapeuticAreaName"),
+                ).otherwise(F.lit("other")),
+            )
+            .groupby("therapeuticAreaName")
+            .agg(
+                F.size(F.collect_set(F.concat_ws("-", "diseaseId", "targetId"))).alias(
+                    "associations"
+                ),
+            )
+            .withColumn("year", F.lit(year))
+            .write.parquet(
+                "gs://ot-team/cfalaguera/novels/associationsByArea/novelty={}/year={}".format(
+                    cutoff, year
+                )
+            )
+        )
+
+        (
+            pairs.withColumn("year", F.lit("year"))
+            .groupby("year")
+            .agg(
+                F.size(F.collect_set("targetId")).alias("targets"),
+            )
+            .write.parquet(
+                "gs://ot-team/cfalaguera/novels/targets/novelty={}/year={}".format(
+                    cutoff, year
+                )
+            )
+        )
