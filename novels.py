@@ -655,9 +655,11 @@ def getTherapeuticAreaForDisease():
     return diseases
 
 
-for cutoff in range(1, 10):
+# for cutoff in range(1, 10):
+for cutoff in [4]:
     cutoff = cutoff / 10
-    for year in range(2000, 2023 + 1):
+    # for year in range(2000, 2023 + 1):
+    for year in range(2023, 2023 + 1):
         pairs = (
             spark.read.parquet(associationByDatasourceDirectOverYears_file)
             .withColumn(
@@ -741,6 +743,12 @@ for cutoff in range(1, 10):
                 "left",
             )
             .distinct()
+        )
+
+        pairs.toPandas().to_csv(
+            "gs://ot-team/cfalaguera/novels/associationsWithNoveltyPeak2023.csv",
+            index=False,
+            header=True,
         )
 
         (
