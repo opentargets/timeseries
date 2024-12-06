@@ -60,9 +60,9 @@ import plotTimeseries
 plotTimeseries.plotTargetDisease(targetId="ENSG00000145777", # TSLP
                                  diseaseId="MONDO_0004979", # asthma
                                  showScore=True, showEvidence=True, showNovelty=True,
-                                 img="data/demo_timeline.png"))
+                                 img="data/demo_timelines.png")) # overlap of the 3 plots shown below
 ```
-![alt text](https://github.com/opentargets/timeseries/blob/main/data/demo_timeline.png?raw=true)
+![alt text](https://github.com/opentargets/timeseries/blob/main/data/demo_timelines.png?raw=true)
 
 - List novel target-disease associations in the Open Targets Platform in 2023:
 ```
