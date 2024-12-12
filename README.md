@@ -6,7 +6,7 @@ With the aim of harnessing and expanding the capabilities of the Open Targets Pl
 
 # System Requirements
 
-## Hardare requirements
+## Hardware requirements
 The scripts require only a standard computer with enough RAM to support the in-memory operations.
 
 ## Software requirements
