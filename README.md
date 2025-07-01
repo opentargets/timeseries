@@ -56,6 +56,7 @@ python timeseries.py # run in GC (ERT: 30 min)
 
 - Plot timeseries for a given target-disease association:
 ```
+# run locally
 import plot_timeseries
 plot_timeseries.plotTargetDisease(targetId="ENSG00000145777", # TSLP
                                  diseaseId="MONDO_0004979", # asthma
@@ -64,14 +65,19 @@ plot_timeseries.plotTargetDisease(targetId="ENSG00000145777", # TSLP
 ```
 ![alt text](https://github.com/opentargets/timeseries/blob/main/data/demo_timelines.png?raw=true)
 
-- List novel target-disease associations in the Open Targets Platform in 2023:
+- Count the number of novel target-disease associations and unique novel targets over the years across Open Targets Platform resources.
 ```
-python novels.py
+python novelty_distribution.py # run in GC
 ```
 
 - Analyse temporal trends in novel drug targets discovery from 2000 to 2025.
 ```
 python novelty_approval.py # run in GC
+```
+
+- List novel target-disease associations in the Open Targets Platform in 2023:
+```
+python novels.py
 ```
 
 - General analysis of outputs:
