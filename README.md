@@ -22,42 +22,42 @@ numpy # 1.26.4
 pandas # 2.1.0
 pyspark # 3.3.2
 scipy # 1.11.4
+requests # 2.31.0
 ```
 
 # Execution Guide
 
 1) Parse timestamps for Open Targets Platform evidence from original resources:
 ```
-python timestampsParser.py
+python parse_timestamp.py # run locally (ERT: 3 min) and output files are automatically uploaded to GC
 ```
 
-2) Add timestamps to evidence files in Open Targets Platform:
+2) Setup Google Cloud machine:
 ```
-python parsePublicationYearGC.py
+gcloud dataproc clusters create cf-timeseries
+  --image-version 2.2 --region europe-west1
+  --master-machine-type n1-standard-2
+  --secondary-worker-type spot --worker-machine-type n1-standard-4 --worker-boot-disk-size 500
+  --autoscaling-policy=otg-etl --enable-component-gateway
+  --project open-targets-eu-dev
+```
+
+3) Add timestamps to evidence files in Open Targets Platform:
+```
+python timestamp_evidence.py # run in GC (ERT: 6 min)
 ```
 
 3) Generate timeseries data and assess target-disease associations' novelty:
 ```
-python timeseries.py
+python timeseries.py # run in GC (ERT: 30 min)
 ```
-To demo `timeseries.py` use `data/demo_evidence` as input containing the timestamped evidence for asthma and TSLP association.
-To run the scripts for Open Targets Platform 23.06 as a whole we used a Google Cloud machine with the following specifications:
-```
-gcloud dataproc clusters create cf-timeseries
-  --region europe-west1 --zone europe-west1-d
-  --single-node --master-machine-type n2-highmem-128
-  --master-boot-disk-size 500 --image-version 2.0-debian10
-  --project open-targets-eu-dev
-```
-
-Run times are specified in the scripts.
 
 # Extra Analysis
 
 - Plot timeseries for a given target-disease association:
 ```
-import plotTimeseries
-plotTimeseries.plotTargetDisease(targetId="ENSG00000145777", # TSLP
+import plot_timeseries
+plot_timeseries.plotTargetDisease(targetId="ENSG00000145777", # TSLP
                                  diseaseId="MONDO_0004979", # asthma
                                  showScore=True, showEvidence=True, showNovelty=True,
                                  img="data/demo_timelines.png")) # overlap of the 3 plots shown below
@@ -69,14 +69,9 @@ plotTimeseries.plotTargetDisease(targetId="ENSG00000145777", # TSLP
 python novels.py
 ```
 
-- Analyse temporal trends in novel drug targets discovery since 2000.
+- Analyse temporal trends in novel drug targets discovery from 2000 to 2025.
 ```
-python noveltyTrends.py
-```
-
-- Analyse the co-ocurrance of novelty peaks across resources of the same type.
-```
-python noveltyCorrelation.py
+python novelty_approval.py # run in GC
 ```
 
 - General analysis of outputs:
