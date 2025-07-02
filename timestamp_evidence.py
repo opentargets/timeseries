@@ -98,7 +98,7 @@ def date_cancer_genome_interpreter():
     print("running {} ...".format(inspect.currentframe().f_code.co_name))
 
     if 0:
-        # do not run this because getYearFromCancerGenomeInterpreter() function messes around with sources field and results in more evidence than originally,
+        # do not run this because get_year_from_cancer_genome_interpreter() function at parse_timestamp.py messes around with sources field and results in more evidence than originally,
         # until this is fixed, just map pmids in literature to pubmedYear
         (
             spark.read.parquet(evidence_path + "/sourceId=cancer_biomarkers")
