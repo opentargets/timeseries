@@ -1,52 +1,49 @@
 #!/usr/bin/env python
 
-__author__ = "Maria J. Falaguera"
-__date__ = "10 Jul 2023"
+__author__ = "Cote Falaguera (mjfalagueramata@gmail.com)"
+__date__ = "02 Jul 2025"
 
 """
-timeseries.py: Assess the evolution over time of evidence supporting disease-target associations in the Open Targets Platform. Estimated running time: 4h.
+timeseries.py: Assess the evolution over time of evidence supporting target-disease associations in the Open Targets Platform.
+
+Useful GitHub links:
+- https://github.com/opentargets/timeseries
+- https://github.com/opentargets/issues/issues/2739
 """
 
-# generate gcloud machine
-"""
-gcloud dataproc clusters create cf-timeseries --region europe-west1 --zone europe-west1-d --single-node --master-machine-type n2-highmem-128 --master-boot-disk-size 500 --image-version 2.0-debian10 --project open-targets-eu-dev
-"""
+# Setup Google Cloud machine and sumbit job:
+# gcloud dataproc clusters create cf-timeseries --image-version 2.2 --region europe-west1 --master-machine-type n1-standard-2 --secondary-worker-type spot --worker-machine-type n1-standard-4 --worker-boot-disk-size 500 --autoscaling-policy=otg-etl --optional-components=JUPYTER --enable-component-gateway --project open-targets-eu-dev
+# gcloud dataproc jobs submit pyspark timeseries.py --cluster=cf-timeseries --project=open-targets-eu-dev --region="europe-west1"
 
-# sumbit job to gcloud machine
-"""
-gcloud dataproc jobs submit pyspark timeseries.py --cluster=cf-timeseries --project=open-targets-eu-dev --region="europe-west1"
-"""
 
 import datetime
 import os
+import time
+from datetime import timedelta
 
-import numpy as np
-from pyspark.ml import functions as fml
-from pyspark.ml.linalg import DenseVector
 from pyspark.sql import functions as F
 from pyspark.sql import SparkSession, Window
 from pyspark.sql import types as T
 
 
 # Required data
-firstYear = 1970
-lastYear = 2023  # datetime.date.today().year
-noveltyScale = 2  # 2 for long tailed slow decays
-noveltyShift = 2  # 3 for long tailed slow decays
-noveltyWindow = 10
-maxScore = np.sum(1 / np.arange(1, 100000 + 1) ** 2)
+first_year = 2000
+last_year = datetime.date.today().year
+novelty_scale = 2  # 2 for long tailed slow decays
+novelty_shift = 2  # 3 for long tailed slow decays
+novelty_window = 10
+max_score = 1.64  # np.sum(1 / np.arange(1, 10000 + 1) ** 2)
 
-
-dataSources = [
+data_source = [
     {
-        "id": "ot_genetics_portal",
-        "sectionId": "otGenetics",
-        "label": "OT Genetics",
+        "id": "gwas_credible_sets",
+        "sectionId": "gwasCredibleSets",
+        "label": "GWAS associations",
         "aggregation": "Genetic association",
         "aggregationId": "genetic_association",
         "weight": 1.0,  # needs to be a float
         "isPrivate": False,
-        "docsLink": "https://platform-docs.opentargets.org/evidence#open-targets-genetics",
+        "docsLink": "https://platform-docs.opentargets.org/evidence#gwas-associations",
     },
     {
         "id": "eva",
@@ -302,284 +299,86 @@ dataSources = [
 
 
 # Paths
-ot_platform_version = "23.06"
+ot_platform_version = "25.03"
 
-## data path
-data_path = "gs://open-targets-data-releases/{}/output/etl/parquet/".format(
-    ot_platform_version
+data_path = "gs://open-targets-data-releases/{}/output/".format(ot_platform_version)
+disease_file = data_path + "disease"
+
+results_path = "gs://ot-team/cfalaguera/{}/".format(ot_platform_version)
+evidence_dated_file = results_path + "/evidence_dated/"
+evidence_dated_indirect_file = results_path + "/evidence_dated_indirect/"
+association_by_datasource_dated_indirect_file = (
+    results_path + "association_by_datasource_dated_indirect"
 )
-evidence_file = data_path + "evidence"
-diseases_file = data_path + "diseases"
-literatureIndex_file = data_path + "literature/literatureIndex"
-
-## results path
-results_path = "gs://ot-team/cfalaguera/novelty/{}/".format(ot_platform_version)
-
-evidenceIndirect_file = results_path + "evidenceIndirect"
-
-evidenceIndirectDated_file = results_path + "evidenceIndirectDated"
-
-evidenceDirectDated_file = results_path + "evidenceDirectDated"
-
-associationByDatasourceIndirectOverYears_file = (
-    results_path + "associationByDatasourceIndirectOverYears"
+association_by_overall_dated_indirect_file = (
+    results_path + "association_by_overall_dated_indirect"
 )
+association_by_datasource_dated_file = results_path + "association_by_datasource_dated"
+association_by_overall_dated_file = results_path + "association_by_overall_dated"
 
-associationByOverallIndirectOverYears_file = (
-    results_path + "associationByOverallIndirectOverYears"
-)
-
-associationByDatasourceDirectOverYears_file = (
-    results_path + "associationByDatasourceDirectOverYears"
-)
-
-associationByOverallDirectOverYears_file = (
-    results_path + "associationByOverallDirectOverYears"
-)
-
-associationByGeneticIndirectOverYears_file = (
-    results_path + "associationByGeneticIndirectOverYears"
-)
-associationByLiteratureIndirectOverYears_file = (
-    results_path + "associationByLiteratureIndirectOverYears"
-)
-associationByClinicalIndirectOverYears_file = (
-    results_path + "associationByClinicalIndirectOverYears"
-)
-
-reportEvidenceIndirectDated_file = results_path + "reportEvidenceIndirectDated"
-reportEvidenceDirectDated_file = results_path + "reportEvidenceDirectDated"
-
+# novelty_by_datasource_dated_file = results_path + "novelty_by_datasource_dated"
+# novelty_by_datasource_dated_indirect_file = (
+#     results_path + "novelty_by_datasource_dated_indirect"
+# )
 
 # Establish spark connection
 spark = SparkSession.builder.getOrCreate()
 
 
-# Prerequired functions
-def getHarmonicScore(cumScores: DenseVector) -> float:
-    """
-    Calculate harmonic sum score of list of scores.
-
-    Args:
-        cumScores (DenseVector):    list of evidence score
-
-    Returns:
-        harmonicScore (float):      harmonic sum score of list of evidence score
-    """
-
-    # convert scores into numpy array (to be able to apply isnan function)
-    cumScores = np.array(cumScores)
-
-    # remove nan scores
-    cumScores = cumScores[~np.isnan(cumScores)]
-
-    # sort scores in descending order and select top50 to speed up
-    cumScores = np.sort(cumScores)[::-1][:50]
-
-    # calculate harmonic sum score = ( score1/1^2 + score2/2^2 + score3/3^2 ) / ( 1/1^2 + 1/2^2 + 1/3^2 ... up to 100000)
-    harmonicScore = np.round(
-        np.sum(cumScores / np.arange(1, len(cumScores) + 1) ** 2) / maxScore,
-        3,
-    )
-
-    return float(harmonicScore)
-
-
-def getDatasourceToWeight():
+def get_weight_for_datasource():
     """
     Returns list of data sources' weights for overall score.
     """
 
-    weights = [[datasource["id"], datasource["weight"]] for datasource in dataSources]
+    weights = [[datasource["id"], datasource["weight"]] for datasource in data_source]
 
     return weights
 
 
-# Run novelty assessment functions
-def getEvidence(
-    evidenceLink="indirect",
-    diseases_file=diseases_file,
-    evidence_file=evidence_file,
-):
+# Novelty assessment functions
+def get_indirect_evidence():
     """
-    Get evidence from OT.
-
-    Args:
-        evidenceLink (str):  'direct' or 'indirect'
-        diseases_file (str): path to OT diseases file
-        evidence_file (str): path to OT evidence file
-
-    Returns:
-        Dataframe with evidence. Columns:
-        - targetId
-        - datasourceId
-        - score
-        - literature
-        - studyStartDate
-        - diseaseId
-        - drugId
-        - clinicalPhase
+    Propagate dated evidence accross disease ontology.
     """
 
-    if evidenceLink == "direct":
-        return spark.read.parquet(evidence_file)
+    if os.path.exists(evidence_dated_indirect_file):
+        pass
 
-    elif evidenceLink == "indirect":
-        # disease ontology expansion
-        diseases = spark.read.parquet(diseases_file).select(
-            F.col("id").alias("diseaseId"),
-            F.explode(
-                F.array_union(F.array(F.col("id")), F.col("ancestors"))
-            ).alias(  # add descendant to ancestors list to keep it for later
-                "specificDiseaseId"
-            ),
-        )
+    else:
 
-        # get indirect evidence
-        evidenceIndirect = (
-            spark.read.parquet(evidence_file)
-            .select(
+        (
+            spark.read.parquet(evidence_dated_file)
+            .join(
+                spark.read.parquet(disease_file).select(
+                    F.col("id").alias("diseaseId"),
+                    F.explode(
+                        F.array_union(F.array(F.col("id")), F.col("ancestors"))
+                    ).alias(  # add descendant to ancestors list to keep it for later
+                        "specificDiseaseId"
+                    ),
+                ),
                 "diseaseId",
-                "targetId",
-                "datasourceId",
-                "score",
-                "literature",
-                "studyStartDate",
-                "drugId",
-                "clinicalPhase",
-            )
-            .join(diseases, "diseaseId", "inner")  # add ancestors
+                "inner",
+            )  # add ancestors
             .drop("diseaseId")  # drop descendants
             .withColumnRenamed("specificDiseaseId", "diseaseId")
+            .write.parquet(evidence_dated_indirect_file)
         )
 
-        return evidenceIndirect
 
-
-def getEvidenceDated(evidenceLink="indirect"):
+def get_association_score_by_datasource_dated(
+    evidenceLink="indirect",
+    excludeDatasource=[],
+    diseaseId=[],
+    targetId=[],
+    # shuffle=False
+):
     """
-    Map evidence to their publication year (coming from literatureIndex OT file or from evidence studyStartDate field). Estimated running time: 2 mins.
-
-    Args:
-        evidenceLink (str):             'direct' or 'indirect'
-
-    Returns:
-        Dataframe with evidence mapped to their publication year. Columns:
-        - targetId
-        - datasourceId
-        - score
-        - year
-        - diseaseId
-        - clinicalPhase
-        - drugId
-    """
-
-    if evidenceLink == "direct":
-        if os.path.exists(evidenceDirectDated_file):
-            return spark.read.parquet(evidenceDirectDated_file)
-
-    elif evidenceLink == "indirect":
-        if os.path.exists(evidenceIndirectDated_file):
-            return spark.read.parquet(evidenceIndirectDated_file)
-
-    # get evidence
-    evidenceDated = getEvidence(
-        evidenceLink=evidenceLink
-    ).persist()  #  persist since we will call this dataframe more than once
-
-    # map evidence coming from literature to their publication year
-    publications = (
-        evidenceDated.filter((F.col("datasourceId") != "chembl"))
-        .select(
-            "diseaseId",
-            "targetId",
-            "datasourceId",
-            "score",
-            "clinicalPhase",
-            "drugId",
-            F.monotonically_increasing_id().alias(
-                "evidenceId"
-            ),  # add evidenceId to pin the original evidence for later
-            F.explode_outer("literature").alias("pmid"),  # keep evidence with no pmid
-        )
-        # add publication year for pmids
-        .join(
-            spark.read.parquet(literatureIndex_file).select("pmid", "year"),
-            "pmid",
-            "left",  # keep evidence with no year
-        )
-        # get the earliest year for each evidence if there's more than one; or NULL if there's no year
-        .groupBy(
-            "diseaseId",
-            "targetId",
-            "datasourceId",
-            "score",
-            "clinicalPhase",
-            "drugId",
-            "evidenceId",
-        )
-        .agg(F.min("year").alias("year"))
-        .drop("evidenceId")
-    )
-
-    # map evidence coming from studies to their study start year (chembl evidence)
-    studies = evidenceDated.filter((F.col("datasourceId") == "chembl")).select(
-        "diseaseId",
-        "targetId",
-        "datasourceId",
-        "score",
-        "clinicalPhase",
-        "drugId",
-        # get year from study start date
-        F.split(F.col("studyStartDate"), "-").getItem(0).alias("year"),
-    )
-
-    # studies + publications
-    evidenceDated = studies.unionByName(publications)
-
-    # unpersist to free up memory
-    evidenceDated.unpersist()
-
-    return evidenceDated
-
-
-def reportEvidenceDated(evidenceLink="indirect"):
-    """
-    Report the amount of evidence by source with or without publication date annotated. Estimated running time: 2h.
+    Recalculate association scores by datasource over the years. Estimated running time: 2h.
 
     Args:
         evidenceLink (str): 'direct' or 'indirect'
-
-    Returns:
-        Dataframe with evidence mapped to their publication year. Columns:
-        - datasourceId
-        - nAll
-        - nDated
-    """
-
-    evidence = (
-        getEvidenceDated(evidenceLink=evidenceLink)
-        .groupBy("datasourceId")
-        .agg(F.count("*").alias("nAll"))
-        .join(
-            getEvidenceDated(evidenceLink=evidenceLink)
-            .filter(F.col("year").isNotNull())
-            .groupBy("datasourceId")
-            .agg(F.count("*").alias("nDated")),
-            "datasourceId",
-            "left",
-        )
-    )
-
-    return evidence
-
-
-def getScoreByDatasourceOverYears(datasourceId, evidenceLink="indirect"):
-    """
-    Recalculate association scores by datasource over the years.
-
-    Args:
-        evidenceLink (str): 'direct' or 'indirect'
+        shuffle (bool):     True or False. Shuffle evidence for statistic p-value analysis
 
     Returns:
         Dataframe with association scores by datasource over the years. Columns:
@@ -591,94 +390,151 @@ def getScoreByDatasourceOverYears(datasourceId, evidenceLink="indirect"):
     """
 
     # get dated evidence
-    scoreByDatasourceOverYears = getEvidenceDated(evidenceLink=evidenceLink).filter(
-        F.col("datasourceId") == datasourceId
-    )
+    if evidenceLink == "direct":
+        data = spark.read.parquet(evidence_dated_file)
+        f = association_by_datasource_dated_file
+    elif evidenceLink == "indirect":
+        data = spark.read.parquet(evidence_dated_indirect_file)
+        f = association_by_datasource_dated_indirect_file
 
-    # fill non-dated evidence with lastYear + 1 to avoid loosing them (we'll reset them later)
-    scoreByDatasourceOverYears = scoreByDatasourceOverYears.fillna(
-        str(lastYear + 1), subset=["year"]  # it needs to be a str to avoid errors
-    )
+    # exclude data_source
+    if len(excludeDatasource):
+        data = data.filter(~F.col("datasourceId").isin(excludeDatasource))
 
-    # get all the combinations of datasourceId vs years in the range between the firstYear and the lastYear set
-    sourceVSyear = (
-        # unique sources
-        scoreByDatasourceOverYears.select("datasourceId")
-        .distinct()
-        .crossJoin(
-            # unique years in range
-            spark.createDataFrame(
-                data=[
-                    [r] for r in range(firstYear, lastYear + 1 + 1, 1)
-                ],  # lastYear + 1 as a surrogate for non-dated evidence
-                schema=["year"],
+    if len(diseaseId):
+        data = data.filter(~F.col("diseaseId").isin(diseaseId))
+
+    if len(targetId):
+        data = data.filter(~F.col("targetId").isin(targetId))
+
+    if os.path.exists(f):
+        pass
+
+    else:
+
+        # shuffle evd (for statistic p-value calculations)
+        # if shuffle:
+        #     data = (
+        #         data.select(["diseaseId", "targetId"])
+        #         .orderBy(F.rand())
+        #         .withColumn("idx", F.monotonically_increasing_id())
+        #         .join(
+        #             data.select(
+        #                 [
+        #                     col
+        #                     for col in data.columns
+        #                     if (col != "diseaseId") & (col != "targetId")
+        #                 ]
+        #             ).withColumn("idx", F.monotonically_increasing_id()),
+        #             "idx",
+        #             "inner",
+        #         )
+        #         .drop("idx")
+        #     )
+
+        # fill non-dated evidence with last_year + 1 to avoid loosing them (we'll reset them later)
+        data = data.withColumn("year", F.col("year").cast(T.IntegerType())).fillna(
+            last_year + 1, subset=["year"]
+        )
+
+        # get all the combinations of datasourceId vs years in the range between the first_year and the last_year set
+        sourceVSyear = (
+            # unique sources
+            data.select("datasourceId")
+            .distinct()
+            .crossJoin(
+                # unique years in range
+                spark.createDataFrame(
+                    data=[
+                        [r] for r in range(first_year, last_year + 1 + 1, 1)
+                    ],  # last_year+1 as a surrogate for non-dated evidence
+                    schema=["year"],
+                )
+            )
+            .repartition(400, "year")  # repartition required after crossJoin
+        )
+
+        # get all the combinations of datasourceId vs years vs disease-target score
+        data = (
+            sourceVSyear.join(
+                data.select("diseaseId", "targetId", "datasourceId").distinct(),
+                "datasourceId",
+                "left",
+            )
+            # disease - target - datasource - year - score
+            .join(
+                data,
+                ["diseaseId", "targetId", "datasourceId", "year"],
+                "left",
             )
         )
-        .repartition(400, "year")  # repartition required after crossJoin
-    )
 
-    # get all the combinations of datasourceId vs years vs disease-target score
-    scoreByDatasourceOverYears = (
-        # disease - target - datasource
-        scoreByDatasourceOverYears.select(
-            "diseaseId", "targetId", "datasourceId"
-        ).distinct()
-        # disease - target - datasource - year
-        .join(
-            F.broadcast(sourceVSyear), "datasourceId", "right"
-        )  # broadcast is applied by default to <100 MB dataframes, in this case, force broadcast
-        # disease - target - datasource - year - score
-        .join(
-            scoreByDatasourceOverYears,
-            ["diseaseId", "targetId", "datasourceId", "year"],
-            "left",
+        # prepare partition: all evidence accumulated for each disease-target-datasource-year triplet until the given year
+        partition1 = (
+            Window.partitionBy("diseaseId", "targetId", "datasourceId")
+            .orderBy("year")
+            .rangeBetween(Window.unboundedPreceding, 0)
         )
-    )
 
-    # recalculate harmonic sum scores over the years considering the evidence accumulated
-
-    # register udf function
-    harmonicScore = F.udf(getHarmonicScore, T.DoubleType())
-
-    # prepare partition: all evidence accumulated for each disease-target-datasource triplet until the given year
-    partition1 = (
-        Window.partitionBy("diseaseId", "targetId", "datasourceId")
-        .orderBy("year")
-        .rangeBetween(
-            Window.unboundedPreceding, 0
-        )  # 0 = current year; unboundedPreceding = years prior to current year
-    )
-
-    # apply functions to partition: for each target-disease-datasourece-year calculate harmonic sum score
-    scoreByDatasourceOverYears = (
-        scoreByDatasourceOverYears.select(
-            "diseaseId",
-            "targetId",
-            "datasourceId",
-            "year",
-            harmonicScore(
-                fml.array_to_vector(F.collect_list("score").over(partition1))
-            ).alias("score"),
+        # recalculate harmonic sum scores over the years considering the evidence accumulated
+        data = (
+            data.groupBy("diseaseId", "targetId", "datasourceId", "year")
+            # collect list of scores FOR each year
+            .agg(F.collect_list("score").alias("cum_scores"))
+            # collect scores UNTIL each year
+            .withColumn(
+                "cum_scores", F.flatten(F.collect_list("cum_scores").over(partition1))
+            )
+            # remove NaNs from the cumulative scores array
+            .withColumn(
+                "scores_no_nan", F.expr("filter(cum_scores, x -> NOT isnan(x))")
+            )
+            # sort descending and take top 50 scores
+            .withColumn("scores_sorted", F.reverse(F.array_sort("scores_no_nan")))
+            .withColumn("top50_scores", F.expr("slice(scores_sorted, 1, 50)"))
+            # generate indices (1-based) for the top 50 scores
+            .withColumn("idx", F.sequence(F.lit(1), F.size("top50_scores")))
+            # zip scores and indices, and divide each score by idx^2
+            .withColumn(
+                "weighted_scores",
+                F.expr(
+                    "transform(arrays_zip(top50_scores, idx), x -> x.top50_scores / pow(x.idx, 2))"
+                ),
+            )
+            # sum the weighted scores
+            .withColumn(
+                "harmonic_sum",
+                F.expr("aggregate(weighted_scores, 0D, (acc, x) -> acc + x)"),
+            )
+            # normalize by max_score
+            .withColumn("harmonic_score", F.col("harmonic_sum") / F.lit(max_score))
+            # select
+            .select(
+                "targetId",
+                "diseaseId",
+                "year",
+                "datasourceId",
+                F.col("harmonic_score").alias("score"),
+            )
+            # recover non-dated evidence
+            .withColumn(
+                "year",
+                F.when(F.col("year") == last_year + 1, None).otherwise(F.col("year")),
+            )
+            .withColumn("sourceId", F.col("datasourceId"))
+            .write.partitionBy("sourceId")
+            .parquet(f)
         )
-        .distinct()  # get rid of rows multiplicity coming from different original scores
-        .replace(
-            float("nan"), None, subset=["score"]
-        )  # convert score = nan values into null values for later (pyspark filter function misshandles nan values)
-        # reset non-dated evidence to null year
-        .replace(
-            str(lastYear + 1), None, subset=["year"]
-        )  # it needs to be a string to avoid errors
-    )
-
-    return scoreByDatasourceOverYears
 
 
-def getNoveltyByDatasourceOverYears(
-    datasourceId,
+def get_association_novelty_by_datasource_dated(
     evidenceLink="indirect",
-    scale=noveltyScale,
-    shift=noveltyShift,
-    window=noveltyWindow,
+    scale=novelty_scale,
+    shift=novelty_shift,
+    window=novelty_window,
+    diseaseId=[],
+    targetId=[],
+    excludeDatasource=[],
 ):
     """
     Calculate novelty of association scores by datasource over the years.
@@ -699,9 +555,22 @@ def getNoveltyByDatasourceOverYears(
         - novelty
     """
 
-    scoreByDatasourceOverYears = getScoreByDatasourceOverYears(
-        evidenceLink=evidenceLink, datasourceId=datasourceId
-    ).persist()  #  persist since we will call this dataframe more than once
+    # get dated score
+    if evidenceLink == "direct":
+        f = association_by_datasource_dated_file
+    elif evidenceLink == "indirect":
+        f = association_by_datasource_dated_indirect_file
+    data = spark.read.parquet(f)
+
+    # exclude data_source
+    if len(excludeDatasource):
+        data = data.filter(~F.col("datasourceId").isin(excludeDatasource))
+
+    if len(diseaseId):
+        data = data.filter(~F.col("diseaseId").isin(diseaseId))
+
+    if len(targetId):
+        data = data.filter(~F.col("targetId").isin(targetId))
 
     # prepare partition: disease-target-datasource triplet ordered by increasing year
     partition1 = Window.partitionBy("diseaseId", "targetId", "datasourceId").orderBy(
@@ -709,10 +578,10 @@ def getNoveltyByDatasourceOverYears(
     )
 
     # calculate novelty for disease-target-datasource over the years
-    noveltyByDatasourceOverYears = (
-        scoreByDatasourceOverYears
-        # fill non-dated evidence with lastYear + 1 to avoid loosing them (we'll reset them later)
-        .fillna(lastYear + 1, subset=["year"])
+    data = (
+        data
+        # fill non-dated evidence with last_year+1 to avoid loosing them (we'll reset them later)
+        .fillna(last_year + 1, subset=["year"])
         # fill NaN score with 0 for later novelty calculation
         .fillna(0, subset=["score"])
         # for each target-disease-datasource get peaks of score shift (when current year score minus previous year score > 0)
@@ -728,16 +597,19 @@ def getNoveltyByDatasourceOverYears(
         # for each peak year, get the range of years within a window, e.g. peakYear=1991 -> range of peakYear + window=3: 1991, 1992, 1993
         .select(
             "*",
-            F.posexplode(
-                F.sequence(
+            F.posexplode(  # Returns a new row for each element with position in the given array or map. Uses the default column name pos for position, and col for elements in the array and key and value for elements in the map unless specified otherwise.
+                F.sequence(  # Generate a sequence of integers from start to stop, incrementing by step. If step is not set, incrementing by 1 if start is less than or equal to stop, otherwise -1.
                     F.col("peakYear"),
                     F.col("peakYear") + window,
                 )
-            ).alias("year-peakYear", "year"),
+            ).alias(
+                "year-peakYear", "year"
+            ),
         )
         # for each peak, calculate the novelty value at the different years within the window (novelty = peakScore/(1+exp^(scale*(year-peakYear-shift))) -> logistic function)
         # and select max. novelty value found for each year
-        .groupBy("diseaseId", "targetId", "datasourceId", "year").agg(
+        .groupBy("diseaseId", "targetId", "datasourceId", "year")
+        .agg(
             F.round(
                 F.max(
                     F.col("peak")
@@ -748,22 +620,22 @@ def getNoveltyByDatasourceOverYears(
         )
         # add max. novelty values to original disease-target-datasource-year dataframe
         .join(
-            scoreByDatasourceOverYears,
+            data,
             ["diseaseId", "targetId", "datasourceId", "year"],
             "right",
         )
         # reset non-dated evidence to null year
-        .replace(lastYear + 1, None, subset=["year"])
+        .replace(last_year + 1, None, subset=["year"])
         # set novelty=0 when novelty=null
         .fillna(0, subset=["novelty"])
+        .withColumn("sourceId", F.col("datasourceId"))
+        .write.mode("overwrite")
+        .partitionBy("sourceId")
+        .parquet(f)
     )
 
-    # scoreByDatasourceOverYears.unpersist()
 
-    return noveltyByDatasourceOverYears
-
-
-def getScoreByOverallOverYears(
+def get_association_score_by_overall_dated(
     evidenceLink="indirect",
     excludeDatasource=[],
 ):
@@ -772,7 +644,7 @@ def getScoreByOverallOverYears(
 
     Args:
         evidenceLink (str):         'direct' or 'indirect'
-        excludeDatasource (list):   datasources to exclude, e.g. "chembl"
+        excludeDatasource (list):   data_source to exclude, e.g. "chembl"
 
     Returns:
         Dataframe with overall association scores over the years. Columns:
@@ -782,76 +654,89 @@ def getScoreByOverallOverYears(
         - score
     """
 
-    # get association score by datasource over the years
+    # get dated score
     if evidenceLink == "direct":
-        scoreByDatasourceOverYears = spark.read.parquet(
-            associationByDatasourceDirectOverYears_file
-        ).persist()  #  persist since we will call this dataframe more than once
+        data = spark.read.parquet(association_by_datasource_dated_file)
+        f = association_by_overall_dated_file
     elif evidenceLink == "indirect":
-        scoreByDatasourceOverYears = spark.read.parquet(
-            associationByDatasourceIndirectOverYears_file
-        ).persist()  #  persist since we will call this dataframe more than once
+        data = spark.read.parquet(association_by_datasource_dated_indirect_file)
+        f = association_by_overall_dated_indirect_file
 
-    # fill non-dated evidence with lastYear + 1 to avoid loosing them (we'll reset them later)
-    scoreByDatasourceOverYears = scoreByDatasourceOverYears.fillna(
-        lastYear + 1, ["year"]
-    )
+    if os.path.exists(f):
+        pass
 
-    # get datasources' weights in overall score formula
-    weights = spark.createDataFrame(
-        data=[
-            [datasourceId, str(weight)]
-            for datasourceId, weight in getDatasourceToWeight()
-        ],
-        schema=["datasourceId", "weight"],
-    )
+    else:
 
-    # exclude datasources
-    if len(excludeDatasource):
-        scoreByDatasourceOverYears = scoreByDatasourceOverYears.filter(
-            ~F.col("datasourceId").isin(excludeDatasource)
+        # fill non-dated evidence with last_year + 1 to avoid loosing them (we'll reset them later)
+        data = data.fillna(last_year + 1, subset=["year"])
+
+        # get data_source' weights in overall score formula
+        weights = spark.createDataFrame(
+            data=[
+                [datasourceId, str(weight)]
+                for datasourceId, weight in get_weight_for_datasource()
+            ],
+            schema=["datasourceId", "weight"],
         )
 
-    # recalculate harmonic sum scores over the years considering the evidence accumulated
+        # exclude data_source
+        if len(excludeDatasource):
+            data = data.filter(~F.col("datasourceId").isin(excludeDatasource))
 
-    # register udfs
-    harmonicScore = F.udf(getHarmonicScore, T.DoubleType())
+        # recalculate harmonic sum scores over the years considering the evidence accumulated
+        data = (
+            # add data_source' weights
+            data.join(weights, "datasourceId", "left")
+            # weight source-specific scores
+            .withColumn("score", F.col("score") * F.col("weight"))
+            # list of weighted scores
+            .groupBy("diseaseId", "targetId", "year")
+            # collect list of scores FOR each year
+            .agg(F.collect_list("score").alias("cum_scores"))
+            # remove NaNs from the cumulative scores array
+            .withColumn(
+                "scores_no_nan", F.expr("filter(cum_scores, x -> NOT isnan(x))")
+            )
+            # sort descending and take top 50 scores
+            .withColumn("scores_sorted", F.reverse(F.array_sort("scores_no_nan")))
+            .withColumn("top50_scores", F.expr("slice(scores_sorted, 1, 50)"))
+            # generate indices (1-based) for the top 50 scores
+            .withColumn("idx", F.sequence(F.lit(1), F.size("top50_scores")))
+            # zip scores and indices, and divide each score by idx^2
+            .withColumn(
+                "weighted_scores",
+                F.expr(
+                    "transform(arrays_zip(top50_scores, idx), x -> x.top50_scores / pow(x.idx, 2))"
+                ),
+            )
+            # sum the weighted scores
+            .withColumn(
+                "harmonic_sum",
+                F.expr("aggregate(weighted_scores, 0D, (acc, x) -> acc + x)"),
+            )
+            # normalize by max_score
+            .withColumn("harmonic_score", F.col("harmonic_sum") / F.lit(max_score))
+            # select
+            .select(
+                "targetId",
+                "diseaseId",
+                "year",
+                F.col("harmonic_score").alias("score"),
+            )
+            # recover non-dated evidence
+            .withColumn(
+                "year",
+                F.when(F.col("year") == last_year + 1, None).otherwise(F.col("year")),
+            )
+            .write.parquet(f)
+        )
 
-    # prepare partition: all evidence accumulated for each disease-target pair until the given year
-    partition1 = Window.partitionBy("diseaseId", "targetId", "year")
 
-    # apply functions to partitions: for each target-disease-year calculate overall harmonic sum score
-    scoreByOverallOverYears = (
-        # add datasources' weights
-        scoreByDatasourceOverYears.join(weights, "datasourceId", "left")
-        # calculate overall harmonic score
-        .select(
-            "diseaseId",
-            "targetId",
-            "year",
-            harmonicScore(
-                fml.array_to_vector(  # vector makes the following calculations faster
-                    F.collect_list(F.col("score") * F.col("weight")).over(partition1)
-                )
-            ).alias("score"),
-            # get rid of "score" and "weight" multiplicity
-        ).distinct()
-        # convert score = nan values into null values (pyspark filter function misshandles nan values)
-        .replace(float("nan"), None, subset=["score"])
-        # reset non-dated evidence to null year
-        .replace(lastYear + 1, None, subset=["year"])
-    )
-
-    scoreByDatasourceOverYears.unpersist()
-
-    return scoreByOverallOverYears
-
-
-def getNoveltyByOverallOverYears(
+def get_association_novelty_by_overall_dated(
     evidenceLink="indirect",
-    scale=noveltyScale,
-    shift=noveltyShift,
-    window=noveltyWindow,
+    scale=novelty_scale,
+    shift=novelty_shift,
+    window=novelty_window,
     excludeDatasource=[],
 ):
     """
@@ -862,7 +747,7 @@ def getNoveltyByOverallOverYears(
         scale (float):              logistic growth rate or steepness of the novelty curve
         shift (float):              x value of the sigmoid's point of the novelty curve
         window (float):             range of years after the peak year to apply decay function to
-        excludeDatasource (list):   datasources to exclude, e.g. "chembl"
+        excludeDatasource (list):   data_source to exclude, e.g. "chembl"
 
     Returns:
         Dataframe with overall novelty of association scores over the years. Columns:
@@ -873,22 +758,23 @@ def getNoveltyByOverallOverYears(
         - novelty
     """
 
-    scoreByOverallOverYears = (
-        getScoreByOverallOverYears(
-            evidenceLink=evidenceLink, excludeDatasource=excludeDatasource
-        )
-        # fill non-dated evidence with lastYear + 1 to avoid loosing them (we'll reset them later)
-        .fillna(lastYear + 1, ["year"])
-        # persist since we will call this dataframe more than once
-        .persist()
-    )
+    # get dated score
+    if evidenceLink == "direct":
+        f = association_by_overall_dated_file
+    elif evidenceLink == "indirect":
+        f = association_by_overall_dated_indirect_file
+    data = spark.read.parquet(
+        f
+    ).persist()  # persist since we will call this dataframe more than once
 
-    # prepare partition: disease-target pair ordered by increasing year
-    partition1 = Window.partitionBy("diseaseId", "targetId").orderBy("year")
+    # fill non-dated evidence with last_year + 1 to avoid loosing them (we'll reset them later)
+    data = data.fillna(last_year + 1, subset=["year"])
+
+    print(data.show())
 
     # calculate novelty for disease-target over the years
-    noveltyByOverallOverYears = (
-        scoreByOverallOverYears
+    (
+        data
         # fill NaN score with 0 for later novelty calculation
         .fillna(0, subset=["score"])
         # for each target-disease get peaks of score shift (when current year score minus previous year score > 0)
@@ -896,7 +782,13 @@ def getNoveltyByOverallOverYears(
             "diseaseId",
             "targetId",
             F.col("year").alias("peakYear"),
-            (F.col("score") - F.lag("score", offset=1).over(partition1)).alias("peak"),
+            #  partition: disease-target pair ordered by increasing year
+            (
+                F.col("score")
+                - F.lag("score", offset=1).over(
+                    Window.partitionBy("diseaseId", "targetId").orderBy("year")
+                )
+            ).alias("peak"),
         )
         # filter peaks
         .filter(F.col("peak") > 0)
@@ -912,7 +804,8 @@ def getNoveltyByOverallOverYears(
         )
         # for each peak, calculate the novelty value at the different years within the window (novelty = peakScore/(1+exp^(scale*(year-peakYear-shift))) -> logistic function)
         # and select max. novelty value found for each year
-        .groupBy("diseaseId", "targetId", "year").agg(
+        .groupBy("diseaseId", "targetId", "year")
+        .agg(
             F.round(
                 F.max(
                     F.col("peak")
@@ -923,100 +816,49 @@ def getNoveltyByOverallOverYears(
         )
         # add max. novelty values to original dataframe disease-target-year
         .join(
-            scoreByOverallOverYears,
+            data,
             ["diseaseId", "targetId", "year"],
             "right",
         )
         # reset non-dated evidence to null year
-        .replace(lastYear + 1, None, subset=["year"])
+        .replace(last_year + 1, None, subset=["year"])
         # set novelty=0 when novelty=null
         .fillna(0, subset=["novelty"])
+        .write.mode("overwrite")
+        .parquet(f)
     )
 
-    scoreByOverallOverYears.unpersist()
-
-    return noveltyByOverallOverYears
-
-
-def writeParquet(dataframe, filename):
-    """
-    Write dataframe into parquet file.
-
-    Args:
-        dataframe (dataframe):  dataframe
-        filename (str):         output file name
-
-    Returns:
-        Parquet file with dataframe
-
-    """
-
-    if not os.path.exists(filename):
-        print("writting {}...".format(filename))
-        dataframe.write.parquet(filename)
-        print("{} succesfully generated! :)".format(filename))
-        spark.catalog.clearCache()  # remove all tables to free up space
+    print(data.show())
+    data.unpersist()
 
 
-if 0:
-    # dating evidence
-    writeParquet(
-        dataframe=getEvidenceDated(evidenceLink="indirect"),
-        filename=evidenceIndirectDated_file,
-    )
+# Run novelty assessment functions
+start_time = time.perf_counter()
 
-    writeParquet(
-        dataframe=reportEvidenceDated(evidenceLink="indirect"),
-        filename=reportEvidenceIndirectDated_file,
-    )
+get_indirect_evidence()
 
-    # datasource novelty
-    for datasourceId in [datasource["id"] for datasource in dataSources]:
-        writeParquet(
-            dataframe=getNoveltyByDatasourceOverYears(
-                evidenceLink="indirect", datasourceId=datasourceId
-            ),
-            filename=associationByDatasourceIndirectOverYears_file
-            + "/sourceId="
-            + datasourceId,
-        )
+get_association_score_by_datasource_dated(
+    evidenceLink="direct",
+)
+get_association_novelty_by_datasource_dated(
+    evidenceLink="direct",
+)
+get_association_score_by_datasource_dated(
+    evidenceLink="indirect",
+)
+get_association_novelty_by_datasource_dated(
+    evidenceLink="indirect",
+)
+get_association_score_by_overall_dated(evidenceLink="direct")
+get_association_novelty_by_overall_dated(evidenceLink="direct")
+get_association_score_by_overall_dated(evidenceLink="indirect")
+get_association_novelty_by_overall_dated(evidenceLink="indirect")
 
-    # overall novelty
-    writeParquet(
-        dataframe=getNoveltyByOverallOverYears(evidenceLink="indirect"),
-        filename=associationByOverallIndirectOverYears_file,
-    )
 
-    # genetic novelty
-    writeParquet(
-        dataframe=getNoveltyByOverallOverYears(
-            evidenceLink="indirect", excludeDatasource=["chembl", "europepmc"]
-        ),
-        filename=associationByGeneticIndirectOverYears_file,
-    )
-
-    # literature novelty
-    writeParquet(
-        dataframe=getNoveltyByOverallOverYears(
-            evidenceLink="indirect",
-            excludeDatasource=[
-                datasource["id"]
-                for datasource in dataSources
-                if datasource["id"] != "europepmc"
-            ],
-        ),
-        filename=associationByLiteratureIndirectOverYears_file,
-    )
-
-    # clinical novelty
-    writeParquet(
-        dataframe=getNoveltyByOverallOverYears(
-            evidenceLink="indirect",
-            excludeDatasource=[
-                datasource["id"]
-                for datasource in dataSources
-                if datasource["id"] != "chembl"
-            ],
-        ),
-        filename=associationByClinicalIndirectOverYears_file,
-    )
+end_time = time.perf_counter()
+elapsed_seconds = end_time - start_time
+elapsed_td = timedelta(seconds=elapsed_seconds)
+days = elapsed_td.days
+hours, remainder = divmod(elapsed_td.seconds, 3600)
+minutes, seconds = divmod(remainder, 60)
+print(f"\nElapsed time: {days:02d}-{hours:02d}:{minutes:02d}:{seconds:02d}")
