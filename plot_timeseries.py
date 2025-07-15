@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 __author__ = "Maria J. Falaguera (mjfalagueramata@gmail.com)"
-__date__ = "02 Jun 2025"
+__date__ = "15 Jul 2025"
 
 """
 plot_timeries.py: Plot timeseries for associations in Open Targets Platform.
