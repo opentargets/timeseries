@@ -75,11 +75,6 @@ python novelty_distribution.py # run in GC
 python novelty_approval.py # run in GC
 ```
 
-- List novel target-disease associations in the Open Targets Platform in 2023:
-```
-python novels.py
-```
-
 - General analysis of outputs:
 ```
 analysis.ipynb
