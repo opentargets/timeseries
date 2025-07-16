@@ -82,7 +82,7 @@ analysis.ipynb
 
 # Data availability
 
-The entire data generated with this code has been deposited on Zenodo: https://zenodo.org/records/14968088.
+The entire data generated with this code has been deposited on Zenodo: https://zenodo.org/records/15922783.
 
 # License
 This project is covered under the Apache 2.0 License.
