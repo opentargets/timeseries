@@ -63,7 +63,7 @@ plot_timeseries.plotTargetDisease(targetId="ENSG00000145777", # TSLP
                                  showScore=True, showEvidence=True, showNovelty=True,
                                  img="data/demo_timelines.png")) # overlap of the 3 plots shown below
 ```
-![alt text](https://github.com/opentargets/timeseries/blob/main/data/demo_timelines.png?raw=true)
+![alt text](https://github.com/opentargets/timeseries/blob/main/data/demo_timelines_25.03.png?raw=true)
 
 - Count the number of novel target-disease associations and unique novel targets over the years across Open Targets Platform resources.
 ```
